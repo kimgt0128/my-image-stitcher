@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 import cv2 as cv
 import numpy as np
 
@@ -9,12 +10,18 @@ import numpy as np
 # ──────────────────────────────────────────
 def extract_frames(video_path, n_frames, start_sec=None, end_sec=None, rotate=0):
     cap = cv.VideoCapture(video_path)
+
     if not cap.isOpened():
-        print(f'[ERROR] Cannot open video: {video_path}')
+        print(f"[ERROR] Cannot open video: {video_path}")
         sys.exit(1)
 
     fps = cap.get(cv.CAP_PROP_FPS)
     total_f = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
+
+    if fps <= 0 or total_f <= 0:
+        print("[ERROR] Invalid video information.")
+        sys.exit(1)
+
     duration = total_f / fps
 
     if start_sec is None:
@@ -39,6 +46,7 @@ def extract_frames(video_path, n_frames, start_sec=None, end_sec=None, rotate=0)
     }
 
     frames = []
+
     for idx in indices:
         cap.set(cv.CAP_PROP_POS_FRAMES, int(idx))
         ret, frame = cap.read()
@@ -53,6 +61,7 @@ def extract_frames(video_path, n_frames, start_sec=None, end_sec=None, rotate=0)
 
     cap.release()
 
+    print(f"[INFO] Video path: {video_path}")
     print(f"[INFO] Video duration: {duration:.2f}s")
     print(f"[INFO] Sampling from {start_sec:.2f}s to {end_sec:.2f}s")
     print(f"[INFO] Selected frame indices: {indices}")
@@ -90,6 +99,7 @@ def cylindrical_warp(img, f):
     )
 
     warped[~mask] = 0
+
     return warped
 
 
@@ -115,11 +125,13 @@ def detect_and_match(img1, img2, ratio_thresh=0.7):
     raw_matches = matcher.knnMatch(desc1, desc2, k=2)
 
     good = []
+
     for pair in raw_matches:
         if len(pair) != 2:
             continue
 
         m, n = pair
+
         if m.distance < ratio_thresh * n.distance:
             good.append(m)
 
@@ -188,17 +200,20 @@ def stitch_all(images, focal_length):
     H_pairwise = []
 
     for i in range(n - 1):
-        pts1, pts2, n_matches = detect_and_match(warped_images[i], warped_images[i + 1])
+        pts1, pts2, n_matches = detect_and_match(
+            warped_images[i],
+            warped_images[i + 1]
+        )
+
         H, n_inliers = compute_homography(pts1, pts2)
 
-        print(f"[INFO] pair {i}-{i+1}: matches={n_matches}, inliers={n_inliers}")
+        print(f"[INFO] pair {i}-{i + 1}: matches={n_matches}, inliers={n_inliers}")
 
         if H is None:
             print(f"[ERROR] Matching failed between frame {i} and {i + 1}")
-            print("[TIP] Try reducing --frames, increasing overlap, or changing start/end time.")
+            print("[TIP] Try reducing --frames or increasing overlap.")
             sys.exit(1)
 
-        # 중요: for문 안에서 append 해야 함
         H_pairwise.append(H)
 
     center_idx = n // 2
@@ -206,15 +221,12 @@ def stitch_all(images, focal_length):
     H_cum = [None] * n
     H_cum[center_idx] = np.eye(3)
 
-    # center 기준 왼쪽 이미지들의 누적 변환
     for i in range(center_idx - 1, -1, -1):
         H_cum[i] = H_cum[i + 1] @ np.linalg.inv(H_pairwise[i])
 
-    # center 기준 오른쪽 이미지들의 누적 변환
     for i in range(center_idx + 1, n):
         H_cum[i] = H_cum[i - 1] @ H_pairwise[i - 1]
 
-    # 전체 canvas 크기 계산
     all_corners = []
 
     for i, img in enumerate(warped_images):
@@ -263,7 +275,6 @@ def stitch_all(images, focal_length):
             borderValue=(0, 0, 0)
         )
 
-        # Gaussian feather blending
         mask = (warped.sum(axis=2) > 0).astype(np.float32)
 
         alpha = cv.GaussianBlur(mask, (51, 51), 0)
@@ -274,6 +285,7 @@ def stitch_all(images, focal_length):
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
     valid = weight_sum > 1e-6
+
     canvas[valid] = np.clip(
         canvas_sum[valid] / weight_sum[valid, None],
         0,
@@ -289,18 +301,36 @@ def stitch_all(images, focal_length):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--video', type=str, default='input_video/input.mp4')
-    parser.add_argument('--frames', type=int, default=12)
-    parser.add_argument('--scale', type=float, default=0.5)
-    parser.add_argument('--start', type=float, default=None)
-    parser.add_argument('--end', type=float, default=None)
-    parser.add_argument('--rotate', type=int, default=0)
-    parser.add_argument('--focal-scale', type=float, default=1.2)
+    parser.add_argument("--video", type=str, default=None)
+    parser.add_argument("--frames", type=int, default=12)
+    parser.add_argument("--scale", type=float, default=0.5)
+    parser.add_argument("--start", type=float, default=None)
+    parser.add_argument("--end", type=float, default=None)
+    parser.add_argument("--rotate", type=int, default=0)
+    parser.add_argument("--focal-scale", type=float, default=1.2)
 
     args = parser.parse_args()
 
+    # 현재 파일: week7/v1/stitch.py
+    v1_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # week7 디렉토리
+    project_dir = os.path.dirname(v1_dir)
+
+    # 기본 입력: week7/input_video/input.mp4
+    if args.video is None:
+        video_path = os.path.join(project_dir, "input_video", "input.mp4")
+    else:
+        if os.path.isabs(args.video):
+            video_path = args.video
+        else:
+            video_path = os.path.join(project_dir, args.video)
+
+    # 출력: week7/v1/panorama_improved.jpg
+    output_path = os.path.join(v1_dir, "panorama_improved.jpg")
+
     images = extract_frames(
-        args.video,
+        video_path,
         args.frames,
         start_sec=args.start,
         end_sec=args.end,
@@ -327,8 +357,10 @@ def main():
     panorama = stitch_all(images, focal_length)
     panorama = auto_crop(panorama)
 
-    cv.imwrite('panorama_improved.jpg', panorama)
+    cv.imwrite(output_path, panorama)
 
-    print("[INFO] Done! Saved as panorama_improved.jpg")
-if __name__ == '__main__':
+    print(f"[INFO] Done! Saved as {output_path}")
+
+
+if __name__ == "__main__":
     main()
